@@ -1,12 +1,11 @@
-//go:build linux || darwin
-// +build linux darwin
+//go:build linux
+// +build linux
 
 package benchmark
 
 import (
 	"fmt"
 	"io/ioutil"
-	"os"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -14,9 +13,8 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// SetMaxResources sets system resource limits for Unix-like systems.
+// SetMaxResources sets system resource limits for Linux systems.
 func SetMaxResources() error {
-	// Increase max number of threads to 90% of system's maximum.
 	const threadLimit = 10000
 	rLimit := unix.Rlimit{}
 
@@ -33,28 +31,19 @@ func SetMaxResources() error {
 		return fmt.Errorf("unable to set open file limit: %v", err)
 	}
 
-	// Set the Go runtime's max threads to 90% of the system max thread limit, if higher than default
-	var threads uint32
-	if isLinux() {
-		// On Linux, read the thread max from /proc/sys/kernel/threads-max
-		threads, err = readLinuxMaxThreads()
-		if err != nil {
-			return fmt.Errorf("unable to read max threads: %v", err)
-		}
-	} else {
-		// On macOS/FreeBSD, use SysctlUint32 (this is supported)
-		threads, err = unix.SysctlUint32("kern.threads.max")
-		if err != nil {
-			return fmt.Errorf("unable to get max threads via sysctl: %v", err)
-		}
+	// Read the maximum threads value from /proc/sys/kernel/threads-max
+	threads, err := readLinuxMaxThreads()
+	if err != nil {
+		return fmt.Errorf("unable to read max threads: %v", err)
 	}
 
+	// Set the Go runtime's max threads to 90% of the system's max thread limit
 	maxThreads := (int(threads) * 90) / 100
 	if maxThreads > threadLimit {
 		debug.SetMaxThreads(maxThreads)
 	}
 
-	fmt.Println("System resources adjusted for high performance on Unix.")
+	fmt.Println("System resources adjusted for high performance on Linux.")
 	return nil
 }
 
@@ -70,9 +59,4 @@ func readLinuxMaxThreads() (uint32, error) {
 		return 0, fmt.Errorf("unable to parse max threads value: %v", err)
 	}
 	return uint32(threads), nil
-}
-
-// isLinux checks if the operating system is Linux.
-func isLinux() bool {
-	return os.Getenv("GOOS") == "linux" || os.Getenv("OSTYPE") == "linux-gnu"
 }
