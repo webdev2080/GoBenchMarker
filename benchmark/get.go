@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gobenchmarker/config"
@@ -97,8 +98,7 @@ func RunGetBenchmark(params BenchmarkParams) {
 	// Set up concurrency control
 	var wg sync.WaitGroup
 	var totalBytesDownloaded int64 // To track total data downloaded
-	var objectIndex int
-	var mu sync.Mutex
+	var objectIndex int64          // Use atomic integer for object index
 
 	wg.Add(params.Concurrency)
 
@@ -130,16 +130,15 @@ func RunGetBenchmark(params BenchmarkParams) {
 				case <-globalCtx.Done():
 					return // Exit if duration has been exceeded or object count reached
 				default:
-					// Locking for object index
-					mu.Lock()
-					if objectIndex >= params.ObjectCount && params.ObjectCount > 0 {
-						mu.Unlock()
+					// Atomically increment the object index
+					currentIndex := atomic.AddInt64(&objectIndex, 1) - 1
+					if currentIndex >= int64(params.ObjectCount) && params.ObjectCount > 0 {
 						globalCancel() // Manually stop when object count is reached
 						return
 					}
-					objectName := *allObjects[objectIndex%len(allObjects)].Name
-					objectIndex++
-					mu.Unlock()
+
+					// Fetch the object name to download
+					objectName := *allObjects[currentIndex%int64(len(allObjects))].Name
 
 					// Conditionally apply rate limiting
 					if rateLimiter != nil {
@@ -178,10 +177,8 @@ func RunGetBenchmark(params BenchmarkParams) {
 					}
 					getResp.Content.Close()
 
-					// Update the total bytes downloaded
-					mu.Lock()
-					totalBytesDownloaded += bytesRead
-					mu.Unlock()
+					// Update the total bytes downloaded atomically
+					atomic.AddInt64(&totalBytesDownloaded, bytesRead)
 
 					// Update progress bar
 					pb.Increment()

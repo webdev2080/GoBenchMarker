@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gobenchmarker/config"
@@ -15,6 +16,13 @@ import (
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
 	"golang.org/x/time/rate"
 )
+
+// Create a sync.Pool for reusing buffers to avoid excessive memory allocations
+var bufPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, 4098) // This should be set based on params.ObjectSize
+	},
+}
 
 // RunPutBenchmark runs the PUT benchmark, uploading objects concurrently with retry handling
 func RunPutBenchmark(params BenchmarkParams) {
@@ -50,8 +58,7 @@ func RunPutBenchmark(params BenchmarkParams) {
 
 	// Set up concurrency control
 	var wg sync.WaitGroup
-	var objectIndex int
-	var mu sync.Mutex
+	var objectIndex int64 // Replacing the mutex with atomic for efficient counting
 
 	wg.Add(params.Concurrency)
 
@@ -86,15 +93,12 @@ func RunPutBenchmark(params BenchmarkParams) {
 					// Stop if the global context is canceled (either by timeout or manual stop)
 					return
 				default:
-					// Locking for object index
-					mu.Lock()
-					if objectIndex >= params.ObjectCount && params.ObjectCount > 0 {
-						mu.Unlock()
+					// Atomically increment the object index
+					currentIndex := atomic.AddInt64(&objectIndex, 1) - 1
+					if currentIndex >= int64(params.ObjectCount) && params.ObjectCount > 0 {
 						globalCancel() // Manually stop when object count is reached
 						return
 					}
-					objectIndex++
-					mu.Unlock()
 
 					// Generate object name and prepare data
 					objectName, err := GenerateRandomName(8)
@@ -103,7 +107,10 @@ func RunPutBenchmark(params BenchmarkParams) {
 						return
 					}
 
-					data := make([]byte, params.ObjectSize)
+					// Reuse the buffer from the pool
+					data := bufPool.Get().([]byte)
+					defer bufPool.Put(data) // Return buffer to the pool after usage
+
 					request := objectstorage.PutObjectRequest{
 						NamespaceName: common.String(namespace),
 						BucketName:    common.String(params.BucketName),
@@ -111,7 +118,7 @@ func RunPutBenchmark(params BenchmarkParams) {
 						PutObjectBody: nopCloser{bytes.NewReader(data)},
 					}
 
-					// Conditionally apply rate limiting
+					// Apply rate limiting if specified
 					if rateLimiter != nil {
 						err := rateLimiter.Wait(globalCtx) // Wait for rate limiter if applied
 						if err != nil {
@@ -120,8 +127,12 @@ func RunPutBenchmark(params BenchmarkParams) {
 						}
 					}
 
+					// Use per-request timeout
+					reqCtx, reqCancel := context.WithTimeout(globalCtx, 30*time.Second) // Set per-request timeout
+					defer reqCancel()
+
 					// Retry logic for uploading objects with detailed error logging
-					err = uploadWithRetry(client, request, 5, logFile, globalCtx) // Pass global context to handle timeout
+					err = uploadWithRetry(client, request, 5, logFile, reqCtx) // Pass per-request context to handle timeout
 					if err != nil {
 						// Log specific errors, including potential 429 Too Many Requests
 						if serviceErr, ok := common.IsServiceError(err); ok && serviceErr.GetHTTPStatusCode() == 429 {

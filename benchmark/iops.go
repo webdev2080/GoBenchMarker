@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gobenchmarker/config"
@@ -80,11 +81,9 @@ func RunIOPSBenchmark(params BenchmarkParams) {
 
 	// Set up concurrency control
 	var wg sync.WaitGroup
-	var objectIndex int
-	var totalOperations int64 // To track PUT + GET operations
+	var objectIndex int64     // Use atomic integer for object index
+	var totalOperations int64 // To track PUT + GET operations using atomic
 	var totalBytesTransferred int64
-	var mu sync.Mutex
-
 	wg.Add(params.Concurrency)
 
 	// Record the start time
@@ -101,6 +100,13 @@ func RunIOPSBenchmark(params BenchmarkParams) {
 	}
 	defer globalCancel()
 
+	// Create a sync.Pool for reusing byte slices (buffers) to minimize allocations
+	var bufPool = sync.Pool{
+		New: func() interface{} {
+			return make([]byte, params.ObjectSize)
+		},
+	}
+
 	// Goroutines for PUT/GET operations
 	for i := 0; i < params.Concurrency; i++ {
 		go func() {
@@ -112,15 +118,12 @@ func RunIOPSBenchmark(params BenchmarkParams) {
 					// Stop if the global context is canceled (either by timeout or manual stop)
 					return
 				default:
-					// Locking for object index
-					mu.Lock()
-					if objectIndex >= params.ObjectCount && params.ObjectCount > 0 {
-						mu.Unlock()
+					// Atomically increment the object index
+					currentIndex := atomic.AddInt64(&objectIndex, 1) - 1
+					if currentIndex >= int64(params.ObjectCount) && params.ObjectCount > 0 {
 						globalCancel() // Manually stop when object count is reached
 						return
 					}
-					objectIndex++
-					mu.Unlock()
 
 					// Generate object name
 					objectName, err := GenerateRandomName(8)
@@ -129,8 +132,10 @@ func RunIOPSBenchmark(params BenchmarkParams) {
 						return
 					}
 
-					// Prepare data for PUT request
-					data := make([]byte, params.ObjectSize)
+					// Prepare data for PUT request using buffer pool
+					data := bufPool.Get().([]byte)
+					defer bufPool.Put(data)
+
 					putRequest := objectstorage.PutObjectRequest{
 						NamespaceName: common.String(namespace),
 						BucketName:    common.String(params.BucketName),
@@ -145,10 +150,9 @@ func RunIOPSBenchmark(params BenchmarkParams) {
 						continue
 					}
 
-					mu.Lock()
-					totalOperations++
-					totalBytesTransferred += int64(params.ObjectSize) // Count uploaded bytes
-					mu.Unlock()
+					// Atomically update the total operations and bytes transferred
+					atomic.AddInt64(&totalOperations, 1)
+					atomic.AddInt64(&totalBytesTransferred, int64(params.ObjectSize)) // Count uploaded bytes
 
 					// Prepare GET request
 					getRequest := objectstorage.GetObjectRequest{
@@ -164,10 +168,9 @@ func RunIOPSBenchmark(params BenchmarkParams) {
 						continue
 					}
 
-					mu.Lock()
-					totalOperations++
-					totalBytesTransferred += bytesDownloaded // Count downloaded bytes
-					mu.Unlock()
+					// Atomically update the total operations and bytes transferred
+					atomic.AddInt64(&totalOperations, 1)
+					atomic.AddInt64(&totalBytesTransferred, bytesDownloaded)
 
 					// Update progress bar
 					pb.Increment()
