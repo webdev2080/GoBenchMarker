@@ -52,11 +52,14 @@ func RunIOPSBenchmark(params BenchmarkParams, configFilePath string) {
 	// Load OCI config and initialize the ObjectStorage client
 	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
-		panic(err)
+		fmt.Printf("Error loading OCI config: %v\n", err)
+		return // Gracefully exit if config loading fails
 	}
+
 	client, err := objectstorage.NewObjectStorageClientWithConfigurationProvider(provider)
 	if err != nil {
-		panic(err)
+		fmt.Printf("\nError creating Object Storage client: %v\n", err)
+		return // Gracefully exit if client creation fails
 	}
 
 	// Get the namespace for object storage

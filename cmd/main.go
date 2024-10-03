@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"gobenchmarker/benchmark"
+	"os"
 	"time"
 )
 
@@ -16,14 +17,21 @@ func main() {
 	operation := flag.String("operation", "PUT", "Operation to perform: PUT, GET, DELETE, MIXED, IOPS, PAR")
 	duration := flag.Int("duration", 0, "Duration in seconds for the benchmark to run")
 	rateLimit := flag.Int("rate-limit", 0, "Max requests per second (0 means no limit)")
-	configFilePath := flag.String("config-file", "~/.oci/config", "Path to OCI config file") // New flag for config file
+	configFilePath := flag.String("config-file", "~/.oci/config", "Path to OCI config file")
 
 	flag.Parse()
+
+	// Ensure the config file exists and is valid
+	if _, err := os.Stat(*configFilePath); os.IsNotExist(err) {
+		fmt.Printf("Error: Config file %s does not exist.\n", *configFilePath)
+		return
+	}
 
 	// Set system resource limits for high-performance testing
 	err := benchmark.SetMaxResources()
 	if err != nil {
 		fmt.Printf("Error setting resources: %v\n", err)
+		return
 	}
 
 	// Initialize the params struct with the parsed values

@@ -8,11 +8,10 @@ import (
 
 // LoadOCIConfig loads the OCI configuration from the specified config file path
 func LoadOCIConfig(configFilePath string) (common.ConfigurationProvider, error) {
-	fmt.Printf("Loading OCI config from: %s\n", configFilePath) // Log the config file being used
+	fmt.Printf("\nLoading OCI config from: %s\n", configFilePath)
 	provider, err := common.ConfigurationProviderFromFile(configFilePath, "DEFAULT")
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to load config from file: %v", err)
 	}
-
 	return provider, nil
 }
