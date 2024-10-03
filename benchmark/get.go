@@ -18,8 +18,8 @@ import (
 )
 
 // RunGetBenchmark runs the GET benchmark, downloading objects concurrently with retry handling and optimized pagination
-func RunGetBenchmark(params BenchmarkParams) {
-	provider, err := config.LoadOCIConfig()
+func RunGetBenchmark(params BenchmarkParams, configFilePath string) {
+	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
 		panic(err)
 	}
@@ -201,7 +201,6 @@ func RunGetBenchmark(params BenchmarkParams) {
 	fmt.Printf("Total Data Downloaded: %.2f MiB\n", float64(totalBytesDownloaded)/(1024*1024))
 	fmt.Printf("Data Throughput: %.2f MiB/s\n", dataThroughput)
 	fmt.Printf("Object Throughput: %.2f objects/s\n", objectThroughput)
-	fmt.Println()
 
 	// Check if throttling occurred based on the log file
 	if CheckLogForThrottling(logFileName) {

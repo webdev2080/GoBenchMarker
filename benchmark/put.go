@@ -25,9 +25,9 @@ var bufPool = sync.Pool{
 }
 
 // RunPutBenchmark runs the PUT benchmark, uploading objects concurrently with retry handling
-func RunPutBenchmark(params BenchmarkParams) {
+func RunPutBenchmark(params BenchmarkParams, configFilePath string) {
 	// Load OCI config and initialize the ObjectStorage client
-	provider, err := config.LoadOCIConfig()
+	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
 		panic(err)
 	}

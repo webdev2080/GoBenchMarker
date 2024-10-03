@@ -1,20 +1,15 @@
 package config
 
 import (
-	"os"
+	"fmt"
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 )
 
-// LoadOCIConfig loads the OCI configuration from the config file
-func LoadOCIConfig() (common.ConfigurationProvider, error) {
-	configFile := os.Getenv("OCI_CONFIG_FILE")
-	if configFile == "" {
-		configFile = "<Config File Path Here>" // Default path for the config file
-	}
-
-	// Use OCI SDK to load credentials from the specified file
-	provider, err := common.ConfigurationProviderFromFile(configFile, "DEFAULT")
+// LoadOCIConfig loads the OCI configuration from the specified config file path
+func LoadOCIConfig(configFilePath string) (common.ConfigurationProvider, error) {
+	fmt.Printf("Loading OCI config from: %s\n", configFilePath) // Log the config file being used
+	provider, err := common.ConfigurationProviderFromFile(configFilePath, "DEFAULT")
 	if err != nil {
 		return nil, err
 	}

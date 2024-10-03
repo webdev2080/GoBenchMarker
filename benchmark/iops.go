@@ -48,9 +48,9 @@ func downloadWithRetry(client objectstorage.ObjectStorageClient, request objects
 }
 
 // RunIOPSBenchmark runs a mixed PUT/GET benchmark focused on measuring IOPS for small objects.
-func RunIOPSBenchmark(params BenchmarkParams) {
+func RunIOPSBenchmark(params BenchmarkParams, configFilePath string) {
 	// Load OCI config and initialize the ObjectStorage client
-	provider, err := config.LoadOCIConfig()
+	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
 		panic(err)
 	}

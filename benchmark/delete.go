@@ -17,9 +17,9 @@ import (
 )
 
 // RunDeleteBenchmark runs the DELETE benchmark, removing objects concurrently in paginated mode
-func RunDeleteBenchmark(params BenchmarkParams) {
+func RunDeleteBenchmark(params BenchmarkParams, configFilePath string) {
 	// Load OCI configuration
-	provider, err := config.LoadOCIConfig()
+	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
 		panic(err)
 	}
