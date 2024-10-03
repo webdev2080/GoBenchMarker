@@ -17,7 +17,7 @@ import (
 )
 
 // RunCreatePARsBenchmark generates PARs concurrently
-func RunCreatePARsBenchmark(params BenchmarkParams, configFilePath string) {
+func RunCreatePARsBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string) {
 	// Load OCI config and initialize the ObjectStorage client
 	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
@@ -31,12 +31,19 @@ func RunCreatePARsBenchmark(params BenchmarkParams, configFilePath string) {
 		return // Gracefully exit if client creation fails
 	}
 
-	// Get the namespace for object storage
-	namespaceResp, err := client.GetNamespace(context.TODO(), objectstorage.GetNamespaceRequest{})
-	if err != nil {
-		panic(err)
+	// Determine namespace: Use provided namespace, or fetch it via API
+	namespace := namespaceOverride
+	if namespace == "" {
+		// No namespace provided, fetch it via the API
+		namespaceResp, err := client.GetNamespace(context.TODO(), objectstorage.GetNamespaceRequest{})
+		if err != nil {
+			panic(err)
+		}
+		namespace = *namespaceResp.Value
+		fmt.Println("Fetched namespace: ", namespace)
+	} else {
+		fmt.Println("Using provided namespace: ", namespace)
 	}
-	namespace := *namespaceResp.Value
 
 	// Create log file to track errors
 	timestamp := time.Now().Format("20060102_150405")

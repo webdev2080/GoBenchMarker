@@ -3,7 +3,9 @@ package benchmark
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
+	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -25,7 +27,7 @@ var bufPool = sync.Pool{
 }
 
 // RunPutBenchmark runs the PUT benchmark, uploading objects concurrently with retry handling
-func RunPutBenchmark(params BenchmarkParams, configFilePath string) {
+func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string) {
 	// Load OCI config and initialize the ObjectStorage client
 	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
@@ -33,18 +35,32 @@ func RunPutBenchmark(params BenchmarkParams, configFilePath string) {
 		return // Gracefully exit if config loading fails
 	}
 
-	client, err := objectstorage.NewObjectStorageClientWithConfigurationProvider(provider)
-	if err != nil {
-		fmt.Printf("\nError creating Object Storage client: %v\n", err)
-		return // Gracefully exit if client creation fails
+	// Disable TLS certificate verification (only for development)
+	customTransport := &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
+	customClient := &http.Client{Transport: customTransport}
 
-	// Get the namespace for object storage
-	namespaceResp, err := client.GetNamespace(context.TODO(), objectstorage.GetNamespaceRequest{})
+	// Use the custom HTTP client with the OCI SDK
+	client, err := objectstorage.NewObjectStorageClientWithConfigurationProvider(provider)
+	client.HTTPClient = customClient
 	if err != nil {
 		panic(err)
 	}
-	namespace := *namespaceResp.Value
+
+	// Determine namespace: Use provided namespace, or fetch it via API
+	namespace := namespaceOverride
+	if namespace == "" {
+		// No namespace provided, fetch it via the API
+		namespaceResp, err := client.GetNamespace(context.TODO(), objectstorage.GetNamespaceRequest{})
+		if err != nil {
+			panic(err)
+		}
+		namespace = *namespaceResp.Value
+		fmt.Println("Fetched namespace: ", namespace)
+	} else {
+		fmt.Println("Using provided namespace: ", namespace)
+	}
 
 	// Create log file to track errors
 	timestamp := time.Now().Format("20060102_150405")

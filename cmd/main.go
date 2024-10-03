@@ -18,6 +18,7 @@ func main() {
 	duration := flag.Int("duration", 0, "Duration in seconds for the benchmark to run")
 	rateLimit := flag.Int("rate-limit", 0, "Max requests per second (0 means no limit)")
 	configFilePath := flag.String("config-file", "~/.oci/config", "Path to OCI config file")
+	namespace := flag.String("namespace", "", "Optional Object Storage namespace") // New flag for namespace
 
 	flag.Parse()
 
@@ -48,25 +49,25 @@ func main() {
 	switch *operation {
 	case "PUT":
 		fmt.Println("Performing PUT benchmark...")
-		benchmark.RunPutBenchmark(params, *configFilePath)
+		benchmark.RunPutBenchmark(params, *configFilePath, *namespace)
 	case "GET":
 		fmt.Println("Performing GET benchmark...")
-		benchmark.RunGetBenchmark(params, *configFilePath)
+		benchmark.RunGetBenchmark(params, *configFilePath, *namespace)
 	case "DELETE":
 		fmt.Println("Performing DELETE benchmark...")
-		benchmark.RunDeleteBenchmark(params, *configFilePath)
+		benchmark.RunDeleteBenchmark(params, *configFilePath, *namespace)
 	case "MIXED":
 		fmt.Println("\nPerforming MIXED benchmark (PUT, GET, DELETE)...\n")
-		benchmark.RunMixedBenchmark(params, *configFilePath)
+		benchmark.RunMixedBenchmark(params, *configFilePath, *namespace)
 	case "IOPS":
 		fmt.Println("\nPerforming IOPS benchmark (PUT/GET Mixed)...\n")
-		benchmark.RunIOPSBenchmark(params, *configFilePath)
+		benchmark.RunIOPSBenchmark(params, *configFilePath, *namespace)
 	case "createPAR":
 		fmt.Println("Performing PAR benchmark (Create Pre-Authenticated Requests)...")
-		benchmark.RunCreatePARsBenchmark(params, *configFilePath) // PAR benchmark
+		benchmark.RunCreatePARsBenchmark(params, *configFilePath, *namespace) // PAR benchmark
 	case "deletePAR":
 		fmt.Println("Performing PAR benchmark (Delete Pre-Authenticated Requests)...")
-		benchmark.RunDeletePARsBenchmark(params, *configFilePath) // PAR benchmark
+		benchmark.RunDeletePARsBenchmark(params, *configFilePath, *namespace) // PAR benchmark
 	default:
 		fmt.Println("Unknown operation:", *operation)
 	}
