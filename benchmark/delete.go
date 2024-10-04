@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gobenchmarker/config"
@@ -15,46 +16,44 @@ import (
 
 	"github.com/oracle/oci-go-sdk/v65/common"
 	"github.com/oracle/oci-go-sdk/v65/objectstorage"
-	"golang.org/x/time/rate"
 )
 
-// RunDeleteBenchmark runs the DELETE benchmark, removing objects concurrently in paginated mode
-func RunDeleteBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string) {
+// RunDeleteBenchmark runs the DELETE benchmark, removing objects concurrently in paginated mode with prefix support
+func RunDeleteBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string, hostOverride string, prefixOverride string) {
 	// Load OCI configuration
 	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
 		fmt.Printf("Error loading OCI config: %v\n", err)
-		return // Gracefully exit if config loading fails
+		return
 	}
 
-	// Disable TLS certificate verification (only for development)
+	// Initialize custom HTTP client with disabled TLS verification
 	customTransport := &http.Transport{
 		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
 	}
 	customClient := &http.Client{Transport: customTransport}
-
-	// Use the custom HTTP client with the OCI SDK
 	client, err := objectstorage.NewObjectStorageClientWithConfigurationProvider(provider)
 	client.HTTPClient = customClient
 	if err != nil {
 		panic(err)
 	}
 
+	// Set host override if provided
+	if hostOverride != "" {
+		client.Host = hostOverride
+	}
+
 	// Determine namespace: Use provided namespace, or fetch it via API
 	namespace := namespaceOverride
 	if namespace == "" {
-		// No namespace provided, fetch it via the API
 		namespaceResp, err := client.GetNamespace(context.TODO(), objectstorage.GetNamespaceRequest{})
 		if err != nil {
 			panic(err)
 		}
 		namespace = *namespaceResp.Value
-		fmt.Println("Fetched namespace: ", namespace)
-	} else {
-		fmt.Println("Using provided namespace: ", namespace)
 	}
 
-	// Create log file with timestamp
+	// Set up log file for errors
 	timestamp := time.Now().Format("20060102_150405")
 	logFileName := fmt.Sprintf("delete_logs_%s.txt", timestamp)
 	logFile, err := os.Create(logFileName)
@@ -63,142 +62,133 @@ func RunDeleteBenchmark(params BenchmarkParams, configFilePath string, namespace
 	}
 	defer logFile.Close()
 
-	// Initialize object count. If object count is not specified, set it to a very large number
-	totalObjects := params.ObjectCount
+	// Calculate the total number of objects to delete
+	totalObjects := int64(params.ObjectCount)
 	if totalObjects == 0 {
-		totalObjects = math.MaxInt64 // Effectively unlimited when only duration is specified
+		totalObjects = math.MaxInt64 // If object count not specified, delete all
 	}
 
-	// Initialize the progress bar
-	pb := progress.NewProgressBar(int64(totalObjects))
+	// Initialize progress bar
+	pb := progress.NewProgressBar(totalObjects)
 	pb.SetCaption("Deleting")
 
-	// Track total deleted objects and concurrency control
+	// Atomic counter for tracking progress
 	var objectCount int64
-	var mu sync.Mutex
 	startTime := time.Now()
 
-	useDuration := params.Duration > 0
-	durationLimit := startTime.Add(params.Duration)
+	// Context handling: for duration or manual cancellation
+	var globalCtx context.Context
+	var globalCancel context.CancelFunc
 
-	// Rate limiter initialization (if required)
-	var rateLimiter *rate.Limiter
-	if params.RateLimit > 0 {
-		rateLimiter = rate.NewLimiter(rate.Limit(params.RateLimit), 1) // Apply rate limit
-		fmt.Println("Rate limiter enabled with rate:", params.RateLimit)
+	if params.Duration > 0 {
+		globalCtx, globalCancel = context.WithTimeout(context.Background(), params.Duration)
+	} else {
+		globalCtx, globalCancel = context.WithCancel(context.Background()) // No timeout; manually cancel when object count is reached
 	}
+	defer globalCancel()
 
-	// Function to delete a single object
-	deleteObject := func(object objectstorage.ObjectSummary) {
-		// Check if we should stop due to object count or duration
-		mu.Lock()
-		if objectCount >= int64(totalObjects) || (useDuration && time.Now().After(durationLimit)) {
-			mu.Unlock()
-			return
-		}
-		objectCount++
-		mu.Unlock()
+	// Buffer for pre-fetching object pages
+	objectCh := make(chan objectstorage.ObjectSummary, 10000)
+	var closeOnce sync.Once // Ensure stopCh is closed only once
+	stopCh := make(chan bool)
 
-		// Perform object deletion
-		_, err := client.DeleteObject(context.TODO(), objectstorage.DeleteObjectRequest{
-			NamespaceName: common.String(namespace),
-			BucketName:    common.String(params.BucketName),
-			ObjectName:    common.String(*object.Name),
-		})
+	// Listing goroutine: Fetches objects by prefix and pushes to objectCh
+	go func() {
+		defer close(objectCh)
+		var nextStartWith *string
 
-		if err != nil {
-			fmt.Fprintf(logFile, "Error deleting object %s: %s\n", *object.Name, err.Error())
-		}
+		for {
+			select {
+			case <-globalCtx.Done():
+				return // Stop if context is canceled or timed out
+			default:
+				listReq := objectstorage.ListObjectsRequest{
+					NamespaceName: common.String(namespace),
+					BucketName:    common.String(params.BucketName),
+					Limit:         common.Int(1000), // Max batch size
+					StartAfter:    nextStartWith,
+					Prefix:        common.String(prefixOverride), // Filter by prefix
+				}
 
-		// Update progress bar
-		pb.Increment()
+				listResp, err := client.ListObjects(globalCtx, listReq)
+				if err != nil {
+					fmt.Fprintf(logFile, "Error listing objects: %s\n", err.Error())
+					return
+				}
 
-		// Rate limiting if applied
-		if rateLimiter != nil {
-			err := rateLimiter.Wait(context.TODO()) // Apply rate limiter delay
-			if err != nil {
-				fmt.Fprintf(logFile, "Rate limiter error: %s\n", err.Error())
+				if len(listResp.Objects) == 0 {
+					return // No more objects to list
+				}
+
+				for _, obj := range listResp.Objects {
+					select {
+					case objectCh <- obj:
+					case <-stopCh:
+						return // Stop processing when stopCh is closed
+					case <-globalCtx.Done():
+						return // Stop processing if context times out
+					}
+				}
+
+				nextStartWith = listResp.NextStartWith
+				if nextStartWith == nil {
+					return // No more pages
+				}
 			}
 		}
+	}()
+
+	// Deletion goroutines: Deleting objects concurrently
+	var wg sync.WaitGroup
+	for i := 0; i < params.Concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case obj, ok := <-objectCh:
+					if !ok {
+						return // Channel closed, stop goroutine
+					}
+					deleteObject(globalCtx, obj, client, namespace, params.BucketName, pb, logFile, &objectCount, totalObjects, stopCh, &closeOnce)
+				case <-globalCtx.Done():
+					return // Stop deletion if the context times out
+				}
+			}
+		}()
 	}
 
-	// Start paginated deletion process
-	var nextStartWith *string
-	for {
-		// Check if the duration limit has been reached before listing the next batch of objects
-		if useDuration && time.Now().After(durationLimit) {
-			break
-		}
+	wg.Wait()
+	closeOnce.Do(func() { close(stopCh) }) // Ensure stopCh is closed only once
 
-		// List objects in pages
-		listReq := objectstorage.ListObjectsRequest{
-			NamespaceName: common.String(namespace),
-			BucketName:    common.String(params.BucketName),
-			Limit:         common.Int(1000), // Limit per batch (experiment with increasing this)
-			Start:         nextStartWith,    // Pagination
-		}
-
-		listResp, err := client.ListObjects(context.TODO(), listReq)
-		if err != nil {
-			fmt.Fprintf(logFile, "Error listing objects: %s\n", err.Error())
-			break
-		}
-
-		// If no objects are found in the current batch, stop
-		if len(listResp.Objects) == 0 {
-			fmt.Println("No more objects to delete.")
-			break
-		}
-
-		// Delete objects concurrently, each in its own goroutine
-		var wg sync.WaitGroup
-		for _, object := range listResp.Objects {
-			wg.Add(1)
-			go func(obj objectstorage.ObjectSummary) {
-				defer wg.Done()
-				deleteObject(obj) // Deleting each object concurrently
-			}(object)
-		}
-
-		// Wait for all deletions in the current batch to complete
-		wg.Wait()
-
-		// Check if we've hit the object count limit
-		mu.Lock()
-		if objectCount >= int64(totalObjects) {
-			mu.Unlock()
-			fmt.Println("Object count limit reached. Stopping deletion.")
-			break
-		}
-		mu.Unlock()
-
-		// Move to the next page of objects
-		nextStartWith = listResp.NextStartWith
-		if nextStartWith == nil {
-			// If no more pages are available, stop the deletion process
-			fmt.Println("All pages processed. No more objects to delete.")
-			break
-		}
-	}
-
-	// Final progress bar finish
+	// Finalize progress bar
 	pb.Finish()
 
-	// Calculate and print benchmark results
+	// Calculate and print results
 	elapsedTime := time.Since(startTime)
-	objectThroughput := float64(objectCount) / elapsedTime.Seconds() // objects/s
+	objectThroughput := float64(objectCount) / elapsedTime.Seconds()
 
-	fmt.Println("\nDELETE Results:")
-	fmt.Printf("Duration: %v\n", elapsedTime)
-	fmt.Printf("Total Objects Processed: %d\n", objectCount)
-	fmt.Printf("Object Throughput: %.2f objects/s\n", objectThroughput)
+	fmt.Printf("\nDELETE Results:\nDuration: %v\nTotal Objects Processed: %d\nObject Throughput: %.2f objects/s\n", elapsedTime, objectCount, objectThroughput)
+}
 
-	// Check if throttling occurred based on the log file
-	if CheckLogForThrottling(logFileName) {
-		fmt.Println("API Throttled: Check delete_logs.txt for more details.")
-	} else {
-		fmt.Println("No API throttling detected.")
+// Delete object helper function
+func deleteObject(ctx context.Context, object objectstorage.ObjectSummary, client objectstorage.ObjectStorageClient, namespace, bucket string, pb *progress.ProgressBar, logFile *os.File, objectCount *int64, totalObjects int64, stopCh chan bool, closeOnce *sync.Once) {
+	_, err := client.DeleteObject(ctx, objectstorage.DeleteObjectRequest{
+		NamespaceName: common.String(namespace),
+		BucketName:    common.String(bucket),
+		ObjectName:    common.String(*object.Name),
+	})
+
+	if err != nil {
+		fmt.Fprintf(logFile, "Error deleting object %s: %s\n", *object.Name, err.Error())
 	}
 
-	fmt.Println()
+	// Update object count and progress bar
+	atomic.AddInt64(objectCount, 1)
+	pb.Increment()
+
+	// Stop if we've reached the target number of objects
+	if atomic.LoadInt64(objectCount) >= totalObjects {
+		closeOnce.Do(func() { close(stopCh) }) // Close stopCh only once
+	}
 }

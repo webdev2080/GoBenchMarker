@@ -3,9 +3,7 @@ package benchmark
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"fmt"
-	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -19,15 +17,8 @@ import (
 	"golang.org/x/time/rate"
 )
 
-// Create a sync.Pool for reusing buffers to avoid excessive memory allocations
-var bufPool = sync.Pool{
-	New: func() interface{} {
-		return make([]byte, 4098) // This should be set based on params.ObjectSize
-	},
-}
-
 // RunPutBenchmark runs the PUT benchmark, uploading objects concurrently with retry handling
-func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string) {
+func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string, hostOverride string, prefixOverride string) {
 	// Load OCI config and initialize the ObjectStorage client
 	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
@@ -35,23 +26,28 @@ func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 		return // Gracefully exit if config loading fails
 	}
 
-	// Disable TLS certificate verification (only for development)
-	customTransport := &http.Transport{
-		TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-	}
-	customClient := &http.Client{Transport: customTransport}
-
-	// Use the custom HTTP client with the OCI SDK
+	// Use the optimized HTTP client with HTTP/2 support from httpclient.go
 	client, err := objectstorage.NewObjectStorageClientWithConfigurationProvider(provider)
-	client.HTTPClient = customClient
+	client.HTTPClient = newHTTPClient() // Use the custom client with HTTP/2
 	if err != nil {
 		panic(err)
+	}
+
+	// Use the hostOverride if provided, otherwise use the SDK default
+	if hostOverride != "" {
+		fmt.Println("Using custom host: ", hostOverride)
+		client.Host = hostOverride
+	}
+
+	// Generate a prefix or use the provided one
+	prefix := prefixOverride
+	if prefix == "" {
+		prefix = fmt.Sprintf("default-%d/", time.Now().UnixNano())
 	}
 
 	// Determine namespace: Use provided namespace, or fetch it via API
 	namespace := namespaceOverride
 	if namespace == "" {
-		// No namespace provided, fetch it via the API
 		namespaceResp, err := client.GetNamespace(context.TODO(), objectstorage.GetNamespaceRequest{})
 		if err != nil {
 			panic(err)
@@ -77,9 +73,7 @@ func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 
 	// Set up concurrency control
 	var wg sync.WaitGroup
-	var objectIndex int64 // Replacing the mutex with atomic for efficient counting
-
-	wg.Add(params.Concurrency)
+	var objectIndex int64 // Atomic for efficient counting
 
 	// Record the start time
 	startTime := time.Now()
@@ -98,14 +92,40 @@ func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 	// Create rate limiter if specified
 	var rateLimiter *rate.Limiter
 	if params.RateLimit > 0 {
-		rateLimiter = rate.NewLimiter(rate.Limit(params.RateLimit), 1) // Create a rate limiter based on the specified rate
+		rateLimiter = rate.NewLimiter(rate.Limit(params.RateLimit), 10) // Reduce rate limit bursts to handle high concurrency
 		fmt.Println("Rate limiter: ", params.RateLimit)
+	}
+
+	// Connection warm-up phase to prime the connection pool
+	fmt.Println("Warming up connections...")
+	for i := 0; i < 100; i++ {
+		// Send a few initial requests to prime the system
+		objectName, err := GeneratePrefixedObjectName(prefix, 8)
+		if err != nil {
+			fmt.Fprintf(logFile, "Warm-up: Error generating object name: %v\n", err)
+			continue
+		}
+		data := GetBuffer(int(params.ObjectSize))
+		request := objectstorage.PutObjectRequest{
+			NamespaceName: common.String(namespace),
+			BucketName:    common.String(params.BucketName),
+			ObjectName:    common.String(objectName),
+			PutObjectBody: nopCloser{bytes.NewReader(data)},
+		}
+		_, err = client.PutObject(context.Background(), request)
+		if err != nil {
+			fmt.Fprintf(logFile, "Warm-up: Error uploading object %s: %v\n", objectName, err)
+		}
+		PutBuffer(data)
 	}
 
 	// Goroutines for PUT operation
 	for i := 0; i < params.Concurrency; i++ {
+		wg.Add(1) // Add to wait group outside goroutine to avoid races
 		go func() {
 			defer wg.Done()
+
+			// Each worker handles its own local buffer to avoid contention
 			for {
 				select {
 				case <-globalCtx.Done():
@@ -120,15 +140,15 @@ func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 					}
 
 					// Generate object name and prepare data
-					objectName, err := GenerateRandomName(8)
+					objectName, err := GeneratePrefixedObjectName(prefix, 8)
 					if err != nil {
-						fmt.Fprintf(logFile, "Error generating random object name: %s\n", err.Error())
+						fmt.Fprintf(logFile, "Error generating object name: %v\n", err)
 						return
 					}
 
-					// Reuse the buffer from the pool
-					data := bufPool.Get().([]byte)
-					defer bufPool.Put(data) // Return buffer to the pool after usage
+					// Create buffer and reuse for object size
+					data := GetBuffer(int(params.ObjectSize))
+					defer PutBuffer(data) // Return buffer to the pool after usage
 
 					request := objectstorage.PutObjectRequest{
 						NamespaceName: common.String(namespace),
@@ -147,11 +167,11 @@ func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 					}
 
 					// Use per-request timeout
-					reqCtx, reqCancel := context.WithTimeout(globalCtx, 30*time.Second) // Set per-request timeout
+					reqCtx, reqCancel := context.WithTimeout(globalCtx, 15*time.Second) // Lower timeout for faster failover
 					defer reqCancel()
 
 					// Retry logic for uploading objects with detailed error logging
-					err = uploadWithRetry(client, request, 5, logFile, reqCtx) // Pass per-request context to handle timeout
+					response, err := client.PutObject(reqCtx, request)
 					if err != nil {
 						// Log specific errors, including potential 429 Too Many Requests
 						if serviceErr, ok := common.IsServiceError(err); ok && serviceErr.GetHTTPStatusCode() == 429 {
@@ -159,6 +179,13 @@ func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 						} else {
 							fmt.Fprintf(logFile, "Error uploading object %s after retries: %s\n", objectName, err.Error())
 						}
+						continue
+					}
+
+					// Handle nil response case
+					if response.HTTPResponse() == nil {
+						fmt.Fprintf(logFile, "Error: Nil HTTP response for object %s\n", objectName)
+						continue
 					}
 
 					// Update progress bar
@@ -172,7 +199,7 @@ func RunPutBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 	pb.Finish()
 
 	// Calculate and print results
-	elapsedTime := time.Since(startTime)                                                                          // Use the actual start time to calculate elapsed time
+	elapsedTime := time.Since(startTime)
 	dataThroughput := (float64(objectIndex) * float64(params.ObjectSize)) / elapsedTime.Seconds() / (1024 * 1024) // MiB/s
 	objectThroughput := float64(objectIndex) / elapsedTime.Seconds()                                              // objects/s
 

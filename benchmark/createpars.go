@@ -17,7 +17,7 @@ import (
 )
 
 // RunCreatePARsBenchmark generates PARs concurrently
-func RunCreatePARsBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string) {
+func RunCreatePARsBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string, hostOverride string) {
 	// Load OCI config and initialize the ObjectStorage client
 	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
@@ -29,6 +29,12 @@ func RunCreatePARsBenchmark(params BenchmarkParams, configFilePath string, names
 	if err != nil {
 		fmt.Printf("\nError creating Object Storage client: %v\n", err)
 		return // Gracefully exit if client creation fails
+	}
+
+	// Use the hostOverride if provided, otherwise use the SDK default
+	if hostOverride != "" {
+		fmt.Println("Using custom host: ", hostOverride)
+		client.Host = hostOverride
 	}
 
 	// Determine namespace: Use provided namespace, or fetch it via API

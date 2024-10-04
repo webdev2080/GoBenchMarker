@@ -18,7 +18,7 @@ import (
 )
 
 // RunDeletePARsBenchmark deletes all PARs for a given bucket
-func RunDeletePARsBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string) {
+func RunDeletePARsBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string, hostOverride string) {
 	// Load OCI config and initialize the ObjectStorage client
 	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
@@ -37,6 +37,12 @@ func RunDeletePARsBenchmark(params BenchmarkParams, configFilePath string, names
 	client.HTTPClient = customClient
 	if err != nil {
 		panic(err)
+	}
+
+	// Use the hostOverride if provided, otherwise use the SDK default
+	if hostOverride != "" {
+		fmt.Println("Using custom host: ", hostOverride)
+		client.Host = hostOverride
 	}
 
 	// Determine namespace: Use provided namespace, or fetch it via API
@@ -73,6 +79,17 @@ func RunDeletePARsBenchmark(params BenchmarkParams, configFilePath string, names
 	// Record the start time
 	startTime := time.Now()
 
+	// Global context: use a timeout if `params.Duration` is provided
+	var globalCtx context.Context
+	var globalCancel context.CancelFunc
+
+	if params.Duration > 0 {
+		globalCtx, globalCancel = context.WithTimeout(context.Background(), params.Duration)
+	} else {
+		globalCtx, globalCancel = context.WithCancel(context.Background())
+	}
+	defer globalCancel()
+
 	// Function to delete a single PAR
 	deletePAR := func(par objectstorage.PreauthenticatedRequestSummary) {
 		defer wg.Done()
@@ -84,66 +101,89 @@ func RunDeletePARsBenchmark(params BenchmarkParams, configFilePath string, names
 			ParId:         common.String(*par.Id),
 		}
 
-		_, err := client.DeletePreauthenticatedRequest(context.TODO(), deleteRequest)
-		if err != nil {
-			fmt.Fprintf(logFile, "Error deleting PAR %s: %s\n", *par.Id, err.Error())
-		} else {
-			atomic.AddInt64(&totalPARs, 1)
-			//fmt.Printf("Successfully deleted PAR: %s\n", *par.Id)
+		select {
+		case <-globalCtx.Done():
+			// Exit if the context has been canceled
+			return
+		default:
+			_, err := client.DeletePreauthenticatedRequest(globalCtx, deleteRequest) // Use globalCtx
+			if err != nil {
+				fmt.Fprintf(logFile, "Error deleting PAR %s: %s\n", *par.Id, err.Error())
+			} else {
+				atomic.AddInt64(&totalPARs, 1)
+			}
+			// Update progress bar
+			pb.Increment()
 		}
-
-		// Update progress bar
-		pb.Increment()
 	}
 
 	// Pagination: Fetch all PARs in the bucket in pages
 	var nextPage *string
+mainLoop:
 	for {
-		// List all PARs for the bucket with pagination
-		listRequest := objectstorage.ListPreauthenticatedRequestsRequest{
-			NamespaceName: common.String(namespace),
-			BucketName:    common.String(params.BucketName),
-			Limit:         common.Int(100), // Fetch 100 PARs per page
-			Page:          nextPage,
+		select {
+		case <-globalCtx.Done():
+			// Exit the loop if the global context has timed out or been canceled
+			fmt.Println("Operation timed out or canceled.")
+			break mainLoop
+		default:
+			// List all PARs for the bucket with pagination
+			listRequest := objectstorage.ListPreauthenticatedRequestsRequest{
+				NamespaceName: common.String(namespace),
+				BucketName:    common.String(params.BucketName),
+				Limit:         common.Int(100), // Fetch 100 PARs per page
+				Page:          nextPage,
+			}
+
+			listResp, err := client.ListPreauthenticatedRequests(globalCtx, listRequest) // Use globalCtx
+			if err != nil {
+				fmt.Fprintf(logFile, "Error listing PARs: %s\n", err.Error())
+				break mainLoop
+			}
+
+			// If no PARs are found, stop the process
+			if len(listResp.Items) == 0 {
+				fmt.Println("No more PARs to delete.")
+				break
+			}
+
+			// Set progress bar total to the number of PARs fetched
+			pb.AddTotal(int64(len(listResp.Items)))
+
+			// Delete each PAR concurrently
+			for _, par := range listResp.Items {
+				select {
+				case <-globalCtx.Done():
+					// Stop creating more goroutines if the context times out
+					fmt.Println("Deletion timed out.")
+					break mainLoop
+				default:
+					wg.Add(1)
+					go deletePAR(par)
+				}
+			}
+
+			// Wait for all the current batch of deletions to complete
+			wg.Wait()
+
+			// If there is a next page, fetch the next batch
+			if listResp.OpcNextPage == nil {
+				break // No more pages, stop
+			}
+			nextPage = listResp.OpcNextPage
 		}
-
-		listResp, err := client.ListPreauthenticatedRequests(context.TODO(), listRequest)
-		if err != nil {
-			fmt.Fprintf(logFile, "Error listing PARs: %s\n", err.Error())
-			break
-		}
-
-		// If no PARs are found, stop the process
-		if len(listResp.Items) == 0 {
-			fmt.Println("No more PARs to delete.")
-			break
-		}
-
-		// Set progress bar total to the number of PARs fetched
-		pb.AddTotal(int64(len(listResp.Items)))
-
-		// Delete each PAR concurrently
-		for _, par := range listResp.Items {
-			wg.Add(1)
-			go deletePAR(par)
-		}
-
-		// Wait for all the current batch of deletions to complete
-		wg.Wait()
-
-		// If there is a next page, fetch the next batch
-		if listResp.OpcNextPage == nil {
-			break // No more pages, stop
-		}
-		nextPage = listResp.OpcNextPage
 	}
 
 	// Final progress bar update and finish
 	pb.Finish()
 
-	// Calculate and print results
+	// Ensure results are printed even on timeout
 	elapsedTime := time.Since(startTime)
+	objectThroughput := float64(totalPARs) / elapsedTime.Seconds()
+
+	// Print final results
 	fmt.Println("\nPAR Deletion Results:")
 	fmt.Printf("Duration: %v\n", elapsedTime)
 	fmt.Printf("Total PARs Deleted: %d\n", totalPARs)
+	fmt.Printf("Throughput: %.2f PARs/s\n", objectThroughput)
 }

@@ -19,6 +19,8 @@ func main() {
 	rateLimit := flag.Int("rate-limit", 0, "Max requests per second (0 means no limit)")
 	configFilePath := flag.String("config-file", "~/.oci/config", "Path to OCI config file")
 	namespace := flag.String("namespace", "", "Optional Object Storage namespace") // New flag for namespace
+	host := flag.String("host", "", "Optional custom Object Storage service host") // New flag for host
+	prefix := flag.String("prefix", "", "Optional custom prefix for objects")      // New flag for host
 
 	flag.Parse()
 
@@ -49,25 +51,25 @@ func main() {
 	switch *operation {
 	case "PUT":
 		fmt.Println("Performing PUT benchmark...")
-		benchmark.RunPutBenchmark(params, *configFilePath, *namespace)
+		benchmark.RunPutBenchmark(params, *configFilePath, *namespace, *host, *prefix)
 	case "GET":
 		fmt.Println("Performing GET benchmark...")
-		benchmark.RunGetBenchmark(params, *configFilePath, *namespace)
+		benchmark.RunGetBenchmark(params, *configFilePath, *namespace, *host, *prefix)
 	case "DELETE":
 		fmt.Println("Performing DELETE benchmark...")
-		benchmark.RunDeleteBenchmark(params, *configFilePath, *namespace)
+		benchmark.RunDeleteBenchmark(params, *configFilePath, *namespace, *host, *prefix)
 	case "MIXED":
 		fmt.Println("\nPerforming MIXED benchmark (PUT, GET, DELETE)...\n")
-		benchmark.RunMixedBenchmark(params, *configFilePath, *namespace)
+		benchmark.RunMixedBenchmark(params, *configFilePath, *namespace, *host, *prefix)
 	case "IOPS":
 		fmt.Println("\nPerforming IOPS benchmark (PUT/GET Mixed)...\n")
-		benchmark.RunIOPSBenchmark(params, *configFilePath, *namespace)
+		benchmark.RunIOPSBenchmark(params, *configFilePath, *namespace, *host, *prefix)
 	case "createPAR":
 		fmt.Println("Performing PAR benchmark (Create Pre-Authenticated Requests)...")
-		benchmark.RunCreatePARsBenchmark(params, *configFilePath, *namespace) // PAR benchmark
+		benchmark.RunCreatePARsBenchmark(params, *configFilePath, *namespace, *host) // PAR benchmark
 	case "deletePAR":
 		fmt.Println("Performing PAR benchmark (Delete Pre-Authenticated Requests)...")
-		benchmark.RunDeletePARsBenchmark(params, *configFilePath, *namespace) // PAR benchmark
+		benchmark.RunDeletePARsBenchmark(params, *configFilePath, *namespace, *host) // PAR benchmark
 	default:
 		fmt.Println("Unknown operation:", *operation)
 	}

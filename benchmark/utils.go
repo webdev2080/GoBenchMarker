@@ -30,6 +30,17 @@ func GenerateRandomName(length int) (string, error) {
 	return hex.EncodeToString(bytes), nil
 }
 
+// GeneratePrefixedObjectName creates a unique object name with a prefix and a random part
+func GeneratePrefixedObjectName(prefix string, randomLength int) (string, error) {
+	// Generate a random hex string
+	randomName, err := GenerateRandomName(randomLength)
+	if err != nil {
+		return "", err
+	}
+	// Combine the prefix and the random string to form the full object name
+	return fmt.Sprintf("%s%s", prefix, randomName), nil
+}
+
 // CheckLogForThrottling scans the log file for "429 TooManyRequests" errors
 func CheckLogForThrottling(logFileName string) bool {
 	file, err := os.Open(logFileName)
@@ -54,24 +65,39 @@ func CheckLogForThrottling(logFileName string) bool {
 	return false
 }
 
-// uploadWithRetry attempts to upload an object with retry logic for 503 and 429 errors, now using a context
+// uploadWithRetry attempts to upload an object with retry logic for 503 and 429 errors
 func uploadWithRetry(client objectstorage.ObjectStorageClient, request objectstorage.PutObjectRequest, retries int, logFile *os.File, ctx context.Context) error {
+	var response objectstorage.PutObjectResponse
+	var err error
+
 	for i := 0; i < retries; i++ {
 		// Use the context with the request to handle timeouts
-		_, err := client.PutObject(ctx, request)
-		if err != nil {
-			if ociError, ok := err.(common.ServiceError); ok && (ociError.GetHTTPStatusCode() == 503 || ociError.GetHTTPStatusCode() == 429) {
-				fmt.Fprintf(logFile, "Retrying after error (%d/%d): %s\n", i+1, retries, err.Error())
-				time.Sleep(time.Duration(i+1) * time.Second) // Exponential backoff
-				continue
+		response, err = client.PutObject(ctx, request)
+		if err == nil {
+			// Ensure response is not nil
+			if response.RawResponse == nil {
+				fmt.Fprintf(logFile, "Received nil response for object %s\n", *request.ObjectName)
+				return fmt.Errorf("nil response from PutObject")
 			}
-			// Handle if the context itself is canceled or exceeded timeout
-			if ctx.Err() != nil {
-				return ctx.Err() // Return the context error if it was canceled or timed out
-			}
-			return err
+			return nil // Success
 		}
-		return nil // Success
+
+		// Retry on 503 (service unavailable) or 429 (too many requests)
+		if ociError, ok := err.(common.ServiceError); ok && (ociError.GetHTTPStatusCode() == 503 || ociError.GetHTTPStatusCode() == 429) {
+			fmt.Fprintf(logFile, "Retrying after error (%d/%d): %s\n", i+1, retries, err.Error())
+			time.Sleep(time.Duration(i+1) * time.Second) // Exponential backoff
+			continue
+		}
+
+		// Handle if the context is canceled or exceeded timeout
+		if ctx.Err() != nil {
+			fmt.Fprintf(logFile, "Context error for object %s: %s\n", *request.ObjectName, ctx.Err().Error())
+			return ctx.Err()
+		}
+
+		// Log the error details and return
+		fmt.Fprintf(logFile, "Error uploading object %s: %s\n", *request.ObjectName, err.Error())
+		return err
 	}
 	return fmt.Errorf("failed after %d retries", retries)
 }

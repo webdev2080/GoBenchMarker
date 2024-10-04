@@ -20,7 +20,7 @@ import (
 )
 
 // RunGetBenchmark runs the GET benchmark, downloading objects concurrently with retry handling and optimized pagination
-func RunGetBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string) {
+func RunGetBenchmark(params BenchmarkParams, configFilePath string, namespaceOverride string, hostOverride string, prefixOverride string) {
 	provider, err := config.LoadOCIConfig(configFilePath)
 	if err != nil {
 		fmt.Printf("Error loading OCI config: %v\n", err)
@@ -38,6 +38,20 @@ func RunGetBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 	client.HTTPClient = customClient
 	if err != nil {
 		panic(err)
+	}
+
+	// Use the hostOverride if provided, otherwise use the SDK default
+	if hostOverride != "" {
+		fmt.Println("Using custom host: ", hostOverride)
+		client.Host = hostOverride
+	}
+
+	// Use the provided prefix, or fetch all objects if no prefix is given
+	var prefix *string
+	if prefixOverride != "" {
+		prefix = common.String(prefixOverride) // Use the provided prefix
+	} else {
+		prefix = nil // Fetch all objects if no prefix is specified
 	}
 
 	// Determine namespace: Use provided namespace, or fetch it via API
@@ -63,19 +77,20 @@ func RunGetBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 	}
 	defer logFile.Close()
 
-	// Fetch only as many objects as needed based on object count
+	// Fetch objects with pagination and (optional) prefix filtering
 	var allObjects []objectstorage.ObjectSummary
 	nextStartWith := (*string)(nil) // Pagination token
 	totalObjectsNeeded := params.ObjectCount
 	objectsFetched := 0
 
 	for {
-		// List the objects in the bucket with pagination
+		// List the objects in the bucket with pagination and using the provided prefix
 		listReq := objectstorage.ListObjectsRequest{
 			NamespaceName: common.String(namespace),
 			BucketName:    common.String(params.BucketName),
 			Limit:         common.Int(1000), // Limit to 1000 objects per page
 			Start:         nextStartWith,    // Pagination token
+			Prefix:        prefix,           // Use the provided prefix or none
 		}
 
 		listResp, err := client.ListObjects(context.TODO(), listReq)
@@ -189,6 +204,12 @@ func RunGetBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 						continue
 					}
 
+					// Ensure GetObjectResponse.Content is not nil
+					if getResp.Content == nil {
+						fmt.Fprintf(logFile, "Received nil content for object %s\n", objectName)
+						continue
+					}
+
 					// Read and discard the object data
 					bytesRead, err := io.Copy(io.Discard, getResp.Content)
 					if err != nil {
@@ -212,7 +233,7 @@ func RunGetBenchmark(params BenchmarkParams, configFilePath string, namespaceOve
 	// Calculate and print benchmark results
 	elapsedTime := time.Since(startTime)                                                      // Use the actual start time for calculating elapsed time
 	dataThroughput := (float64(totalBytesDownloaded)) / elapsedTime.Seconds() / (1024 * 1024) // MiB/s
-	objectThroughput := float64(objectIndex) / elapsedTime.Seconds()                          // objects/s
+	objectThroughput := float64(objectIndex) / elapsedTime.Seconds()
 
 	fmt.Println("\nGET Results:")
 	fmt.Printf("Duration: %v\n", elapsedTime)
